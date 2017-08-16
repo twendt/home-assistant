@@ -11,7 +11,9 @@ import voluptuous as vol
 from homeassistant.const import CONF_DEVICE
 import homeassistant.helpers.config_validation as cv
 
-REQUIREMENTS = ['enocean==0.31']
+REQUIREMENTS = ['https://github.com/kipe/enocean'
+                '/archive/7a0b619471d3ad9b71d897a8f2ffa3cd8ab8f9f3.zip'
+                '#enocean==0.39']
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,14 +58,6 @@ class EnOceanDongle:
         """Send a command from the EnOcean dongle."""
         self.__communicator.send(command)
 
-    # pylint: disable=no-self-use
-    def _combine_hex(self, data):
-        """Combine list of integer values to one big integer."""
-        output = 0x00
-        for i, j in enumerate(reversed(data)):
-            output |= (j << i * 8)
-        return output
-
     def callback(self, temp):
         """Handle EnOcean device's callback.
 
@@ -71,44 +65,11 @@ class EnOceanDongle:
         is an incoming packet.
         """
         from enocean.protocol.packet import RadioPacket
+        from enocean.utils import to_hex_string
         if isinstance(temp, RadioPacket):
-            rxtype = None
-            value = None
-            if temp.data[6] == 0x30:
-                rxtype = "wallswitch"
-                value = 1
-            elif temp.data[6] == 0x20:
-                rxtype = "wallswitch"
-                value = 0
-            elif temp.data[4] == 0x0c:
-                rxtype = "power"
-                value = temp.data[3] + (temp.data[2] << 8)
-            elif temp.data[2] == 0x60:
-                rxtype = "switch_status"
-                if temp.data[3] == 0xe4:
-                    value = 1
-                elif temp.data[3] == 0x80:
-                    value = 0
-            elif temp.data[0] == 0xa5 and temp.data[1] == 0x02:
-                rxtype = "dimmerstatus"
-                value = temp.data[2]
             for device in self.__devices:
-                if rxtype == "wallswitch" and device.stype == "listener":
-                    if temp.sender == self._combine_hex(device.dev_id):
-                        device.value_changed(value, temp.data[1])
-                if rxtype == "power" and device.stype == "powersensor":
-                    if temp.sender == self._combine_hex(device.dev_id):
-                        device.value_changed(value)
-                if rxtype == "power" and device.stype == "switch":
-                    if temp.sender == self._combine_hex(device.dev_id):
-                        if value > 10:
-                            device.value_changed(1)
-                if rxtype == "switch_status" and device.stype == "switch":
-                    if temp.sender == self._combine_hex(device.dev_id):
-                        device.value_changed(value)
-                if rxtype == "dimmerstatus" and device.stype == "dimmer":
-                    if temp.sender == self._combine_hex(device.dev_id):
-                        device.value_changed(value)
+                if to_hex_string(temp.sender) == device.dev_id:
+                    device.process_telegram(temp)
 
 
 class EnOceanDevice():
@@ -121,8 +82,6 @@ class EnOceanDevice():
         self.sensorid = [0x00, 0x00, 0x00, 0x00]
 
     # pylint: disable=no-self-use
-    def send_command(self, data, optional, packet_type):
+    def send_command(self, packet):
         """Send a command via the EnOcean dongle."""
-        from enocean.protocol.packet import Packet
-        packet = Packet(packet_type, data=data, optional=optional)
         ENOCEAN_DONGLE.send_command(packet)
