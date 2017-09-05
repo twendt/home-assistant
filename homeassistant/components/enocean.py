@@ -11,9 +11,7 @@ import voluptuous as vol
 from homeassistant.const import CONF_DEVICE
 import homeassistant.helpers.config_validation as cv
 
-REQUIREMENTS = ['https://github.com/kipe/enocean'
-                '/archive/7a0b619471d3ad9b71d897a8f2ffa3cd8ab8f9f3.zip'
-                '#enocean==0.39']
+REQUIREMENTS = ['enocean==0.40']
 
 _LOGGER = logging.getLogger(__name__)
 
