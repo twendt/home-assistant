@@ -5,7 +5,6 @@ For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/light.enocean/
 """
 import logging
-import math
 
 import voluptuous as vol
 
@@ -13,12 +12,16 @@ from homeassistant.components.light import (
     Light, ATTR_BRIGHTNESS, SUPPORT_BRIGHTNESS, PLATFORM_SCHEMA)
 from homeassistant.const import (CONF_NAME, CONF_ID)
 from homeassistant.components import enocean
+from homeassistant.components.enocean.const import  CONF_SENDER_ID, CONF_EEP
+from homeassistant.components.enocean.commands import (
+    gateway_dim_on, gateway_dim_off)
+from homeassistant.components.enocean.states import gateway_dim_state
+from homeassistant.components.enocean.teach import generate_eltako_38_teachin
+from homeassistant.components.enocean.util import get_hex_list_from_str
 import homeassistant.helpers.config_validation as cv
+from enocean.protocol.constants import RORG
 
 _LOGGER = logging.getLogger(__name__)
-
-CONF_SENDER_ID = 'sender_id'
-CONF_EEP = 'eep'
 
 DEFAULT_NAME = 'EnOcean Light'
 DEPENDENCIES = ['enocean']
@@ -32,16 +35,17 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
 })
 
-
 def setup_platform(hass, config, add_devices, discovery_info=None):
     """Set up the EnOcean light platform."""
     sender_id = config.get(CONF_SENDER_ID)
     devname = config.get(CONF_NAME)
     dev_id = config.get(CONF_ID)
     eep = config.get(CONF_EEP)
-
-    add_devices([EnOceanLight(sender_id, devname, dev_id, eep)])
-
+    eep_class = globals()["EnOceanLight{}".format(eep.replace(":", ""))]
+    try:
+        add_devices([eep_class(sender_id, devname, dev_id, eep)])
+    except NameError:
+        _LOGGER.error("Failed to load class for eep %s", eep)
 
 class EnOceanLight(enocean.EnOceanDevice, Light):
     """Representation of an EnOcean light source."""
@@ -55,16 +59,7 @@ class EnOceanLight(enocean.EnOceanDevice, Light):
         self.dev_id = dev_id
         self._devname = devname
         self._eep = eep
-        self._rorg, self._func, self._type = self._get_hex_list_from_str(eep)
-
-    def _get_hex_list_from_str(self, str):
-        #rorg_str, func_str, type_str = eep.split(':')
-        #return self._get_int_from_str(rorg_str), self._get_int_from_str(func_str), self._get_int_from_str(type_str)
-        return [ self._get_int_from_str(part_str) for part_str in str.split(':') ]
-
-    def _get_int_from_str(self, str):
-        hex_int = int("0x{}".format(str), 16)
-        return hex_int
+        self._rorg, self._func, self._type = get_hex_list_from_str(eep)
 
     @property
     def name(self):
@@ -90,75 +85,43 @@ class EnOceanLight(enocean.EnOceanDevice, Light):
         """Flag supported features."""
         return SUPPORT_ENOCEAN
 
+class EnOceanLightA53808(EnOceanLight):
+    """Representation of an EnOcean light using EEP ."""
+
     def turn_on(self, **kwargs):
         """Turn the light source on or sets a specific dimmer value."""
-        from enocean.protocol.packet import RadioPacket
-        from enocean.protocol.constants import RORG
         brightness = kwargs.get(ATTR_BRIGHTNESS)
         if brightness is not None:
             self._brightness = brightness
         else:
             self._brightness = 256
 
-        bval = math.floor(self._brightness / 256.0 * 100.0)
-        if bval == 0:
-            sw = 0
-        else:
-            sw = 1
-        pack = RadioPacket.create(rorg=RORG.BS4, rorg_func=self._func, rorg_type=self._type,
-                              sender=self._get_hex_list_from_str(self._sender_id),
-                              destination=self._get_hex_list_from_str(self.dev_id),
-                              command=2,
-                              EDIM=bval,
-                              RMP=1,
-                              LRNB=1,
-                              EDIMR=0,
-                              STR=0,
-                              SW=sw)
-        self.send_command(pack)
-        self._on_state = True
+        pack = gateway_dim_on(self._sender_id, self.dev_id, self._brightness)
+        if pack:
+            self.send_command(pack)
 
     def turn_off(self, **kwargs):
         """Turn the light source off."""
-        from enocean.protocol.packet import RadioPacket
-        from enocean.protocol.constants import RORG
-        pack = RadioPacket.create(rorg=RORG.BS4, rorg_func=self._func, rorg_type=self._type,
-                              sender=self._get_hex_list_from_str(self._sender_id),
-                              destination=self._get_hex_list_from_str(self.dev_id),
-                              command=2,
-                              EDIM=1,
-                              RMP=1,
-                              LRNB=1,
-                              EDIMR=0,
-                              STR=0,
-                              SW=0)
-        self.send_command(pack)
-        self._on_state = False
+        pack = gateway_dim_off(self._sender_id, self.dev_id)
+        if pack:
+            self.send_command(pack)
+
+    def teach_in(self, **kwargs):
+        """Send learn telegram to the device"""
+        pack = generate_eltako_38_teachin(self._sender_id, self.dev_id)
+        try:
+            self.send_command(pack)
+        except:
+            _LOGGER.error("Failed to send EnOcean packet")
+
 
     def process_telegram(self, packet):
         """Process incming telegram."""
-        from enocean.protocol.constants import RORG
         if packet.rorg != RORG.BS4:
             return
-        _LOGGER.info("Running process telegram")
-        _LOGGER.info("Func: {}, Type: {}".format(self._func, self._type))
-        packet.parse_eep(self._func, self._type, command=2)
-        parsed = packet.parsed
-        self.mystate = self._get_state(packet, parsed)
-        _LOGGER.info("On State: {}".format(self._on_state))
-        _LOGGER.info("Brightness: {}".format(self._brightness))
-        self.schedule_update_ha_state()
-        return
-
-    def _get_state(self, packet, parsed):
-        """EEP specific funtion to get state."""
-        edim = parsed['EDIM']['raw_value']
-        sw = parsed['SW']['raw_value']
-
-        if sw == 1:
-            self._brightness = math.floor(edim / 100.0 * 256.0)
-            self._on_state = True
-        else:
-            self._on_state = False
-            self._brightness = 0
+        try:
+            self._on_state, self._brightness = gateway_dim_state(packet)
+            self.schedule_update_ha_state()
+        except:
+            _LOGGER.error("Failed to parse packet")
         return

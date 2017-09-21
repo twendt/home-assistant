@@ -8,6 +8,9 @@ import logging
 
 import voluptuous as vol
 
+from homeassistant.components.enocean.const import (
+    CONF_EEP, CONF_STATE_SHORTCUT, CONF_STATE_ATTRIBUTES)
+from homeassistant.components.enocean.util import get_hex_list_from_str
 from homeassistant.components.sensor import PLATFORM_SCHEMA
 from homeassistant.const import (CONF_NAME, CONF_ID)
 from homeassistant.helpers.entity import Entity
@@ -19,10 +22,6 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_NAME = 'EnOcean sensor'
 DEPENDENCIES = ['enocean']
 
-CONF_EEP = 'eep'
-CONF_STATE_SHORTCUT = 'state_shortcut'
-CONF_STATE_ATTRIBUTES = 'state_attributes'
-
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_ID): cv.string,
     vol.Required(CONF_EEP): cv.string,
@@ -31,12 +30,6 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_STATE_ATTRIBUTES): cv.string,
 })
 
-def _get_eep_to_class_map():
-    eep_to_class_map = {
-        'F6:10:00': EnOceanSensorF61000,
-        'F6:02:02': EnOceanSensorF60202,
-    }
-    return eep_to_class_map
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
     """Set up an EnOcean sensor device."""
@@ -46,12 +39,11 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     state_shortcut = config.get(CONF_STATE_SHORTCUT)
     state_attributes = config.get(CONF_STATE_ATTRIBUTES)
 
-    eep_to_class_map = _get_eep_to_class_map()
-
-    if eep in eep_to_class_map:
-        #add_devices([eep_to_class_map[eep](dev_id, devname, eep, state_shortcut, state_attributes)])
-        add_devices([EnOceanSensor(dev_id, devname, eep, state_shortcut, state_attributes)])
-
+    eep_class = globals()["EnOceanSensor{}".format(eep.replace(":", ""))]
+    try:
+        add_devices([eep_class(dev_id, devname, eep, state_shortcut, state_attributes)])
+    except NameError:
+        _LOGGER.error("Failed to load class for eep %s", eep)
 
 class EnOceanSensor(enocean.EnOceanDevice, Entity):
     """Representation of an EnOcean sensor device"""
@@ -63,18 +55,10 @@ class EnOceanSensor(enocean.EnOceanDevice, Entity):
         self.dev_id = dev_id
         self.devname = devname
         self.eep = eep
-        self.rorg, self.func, self.type = self._get_eep_hex_values(eep)
+        self.rorg, self.func, self.type = get_hex_list_from_str(eep)
         self._parsed = {}
         self._state_shortcut = state_shortcut
         self._state_attributes = state_attributes
-
-    def _get_eep_hex_values(self, eep):
-        rorg_str, func_str, type_str = eep.split(':')
-        return self._get_int_from_str(rorg_str), self._get_int_from_str(func_str), self._get_int_from_str(type_str)
-
-    def _get_int_from_str(self, str):
-        hex_int = int("0x{}".format(str), 16)
-        return hex_int
 
     @property
     def name(self):
@@ -83,21 +67,17 @@ class EnOceanSensor(enocean.EnOceanDevice, Entity):
 
     def process_telegram(self, packet):
         """Process incming telegram."""
-        packet.parse_eep(self.func, self.type)
-        self._parsed = packet.parsed
-        if self._state_shortcut in self._parsed:
-            self.mystate =  self._parsed[self._state_shortcut]['raw_value']
-        else:
-            self.mystate = None
-        self.schedule_update_ha_state()
+        try:
+            packet.parse_eep(self.func, self.type)
+            self._parsed = packet.parsed
+            if self._state_shortcut in self._parsed:
+                self.mystate = self._get_state(packet)
+            else:
+                self.mystate = None
+            self.schedule_update_ha_state()
+        except:
+            pass
         return
-
-    def _get_state(packet):
-        """EEP specific funtion to get state."""
-        if self._state_shortcut in self._parsed:
-            return self._parsed[self._state_shortcut]['raw_value']
-        else:
-            return None
 
     @property
     def state(self):
@@ -117,18 +97,41 @@ class EnOceanSensor(enocean.EnOceanDevice, Entity):
 
 class EnOceanSensorF61000(EnOceanSensor):
     """Representation of an EnOcean sensor device using EEP F6:10:00"""
-    def _get_state(self, packet, parsed):
+
+    ICON_MAP = {
+        1: "mdi:arrow-up",
+        2: "mdi:arrow-right",
+        3: "mdi:arrow-down",
+    }
+
+
+    @property
+    def icon(self):
+        """Return the icon for the current state"""
+        if self.mystate in self.ICON_MAP:
+            icon = self.ICON_MAP[self.mystate]
+        else:
+            icon = "mdi:exclamation"
+        return icon
+
+    def _get_state(self, packet):
         """Return the name of the device."""
-        return parsed['WIN']['value']
+        return self._parsed['WIN']['raw_value']
 
 class EnOceanSensorF60202(EnOceanSensor):
     """Representation of an EnOcean sensor device using EEP F6:02:02"""
-    def _get_state(self, packet, parsed):
+
+    def __init__(self, dev_id, devname, eep, state_shortcut, state_attributes):
+        """Initialize the EnOcean sensor device."""
+        EnOceanSensor.__init__(self, dev_id, devname, eep, state_shortcut, state_attributes)
+        self.mystate = 'off'
+
+    def _get_state(self, packet):
         """Return the name of the device."""
-        eb = parsed['EB']['raw_value']
-        sa = parsed['SA']['raw_value']
-        r1 = parsed['R1']['raw_value']
-        r2 = parsed['R2']['raw_value']
+        eb_val = self._parsed['EB']['raw_value']
+        sa_val = self._parsed['SA']['raw_value']
+        r1_val = self._parsed['R1']['raw_value']
+        r2_val = self._parsed['R2']['raw_value']
         values = {
             -1: 'off',
             0: 'AI',
@@ -136,11 +139,11 @@ class EnOceanSensorF60202(EnOceanSensor):
             2: 'BI',
             3: 'BO'}
 
-        if eb == 1:
-            if sa == 0:
-                mystate = values[r1]
+        if eb_val == 1:
+            if sa_val == 0:
+                mystate = values[r1_val]
             else:
-                mystate = "{}{}".format(values[r1], values[r2])
+                mystate = "{}{}".format(values[r1_val], values[r2_val])
         else:
             mystate = values[-1]
         return mystate
