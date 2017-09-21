@@ -5,7 +5,6 @@ For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/light.enocean/
 """
 import logging
-import math
 
 import voluptuous as vol
 
@@ -13,11 +12,16 @@ from homeassistant.components.light import (
     Light, ATTR_BRIGHTNESS, SUPPORT_BRIGHTNESS, PLATFORM_SCHEMA)
 from homeassistant.const import (CONF_NAME, CONF_ID)
 from homeassistant.components import enocean
+from homeassistant.components.enocean.const import  CONF_SENDER_ID, CONF_EEP
+from homeassistant.components.enocean.commands import (
+    gateway_dim_on, gateway_dim_off)
+from homeassistant.components.enocean.states import gateway_dim_state
+from homeassistant.components.enocean.teach import generate_eltako_38_teachin
+from homeassistant.components.enocean.util import get_hex_list_from_str
 import homeassistant.helpers.config_validation as cv
+from enocean.protocol.constants import RORG
 
 _LOGGER = logging.getLogger(__name__)
-
-CONF_SENDER_ID = 'sender_id'
 
 DEFAULT_NAME = 'EnOcean Light'
 DEPENDENCIES = ['enocean']
@@ -25,26 +29,28 @@ DEPENDENCIES = ['enocean']
 SUPPORT_ENOCEAN = SUPPORT_BRIGHTNESS
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Optional(CONF_ID, default=[]):
-        vol.All(cv.ensure_list, [vol.Coerce(int)]),
-    vol.Required(CONF_SENDER_ID): vol.All(cv.ensure_list, [vol.Coerce(int)]),
+    vol.Required(CONF_ID): cv.string,
+    vol.Required(CONF_SENDER_ID): cv.string,
+    vol.Required(CONF_EEP): cv.string,
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
 })
-
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
     """Set up the EnOcean light platform."""
     sender_id = config.get(CONF_SENDER_ID)
     devname = config.get(CONF_NAME)
     dev_id = config.get(CONF_ID)
-
-    add_devices([EnOceanLight(sender_id, devname, dev_id)])
-
+    eep = config.get(CONF_EEP)
+    eep_class = globals()["EnOceanLight{}".format(eep.replace(":", ""))]
+    try:
+        add_devices([eep_class(sender_id, devname, dev_id, eep)])
+    except NameError:
+        _LOGGER.error("Failed to load class for eep %s", eep)
 
 class EnOceanLight(enocean.EnOceanDevice, Light):
     """Representation of an EnOcean light source."""
 
-    def __init__(self, sender_id, devname, dev_id):
+    def __init__(self, sender_id, devname, dev_id, eep):
         """Initialize the EnOcean light source."""
         enocean.EnOceanDevice.__init__(self)
         self._on_state = False
@@ -52,7 +58,8 @@ class EnOceanLight(enocean.EnOceanDevice, Light):
         self._sender_id = sender_id
         self.dev_id = dev_id
         self._devname = devname
-        self.stype = 'dimmer'
+        self._eep = eep
+        self._rorg, self._func, self._type = get_hex_list_from_str(eep)
 
     @property
     def name(self):
@@ -78,31 +85,43 @@ class EnOceanLight(enocean.EnOceanDevice, Light):
         """Flag supported features."""
         return SUPPORT_ENOCEAN
 
+class EnOceanLightA53808(EnOceanLight):
+    """Representation of an EnOcean light using EEP ."""
+
     def turn_on(self, **kwargs):
         """Turn the light source on or sets a specific dimmer value."""
         brightness = kwargs.get(ATTR_BRIGHTNESS)
         if brightness is not None:
             self._brightness = brightness
+        else:
+            self._brightness = 256
 
-        bval = math.floor(self._brightness / 256.0 * 100.0)
-        if bval == 0:
-            bval = 1
-        command = [0xa5, 0x02, bval, 0x01, 0x09]
-        command.extend(self._sender_id)
-        command.extend([0x00])
-        self.send_command(command, [], 0x01)
-        self._on_state = True
+        pack = gateway_dim_on(self._sender_id, self.dev_id, self._brightness)
+        if pack:
+            self.send_command(pack)
 
     def turn_off(self, **kwargs):
         """Turn the light source off."""
-        command = [0xa5, 0x02, 0x00, 0x01, 0x09]
-        command.extend(self._sender_id)
-        command.extend([0x00])
-        self.send_command(command, [], 0x01)
-        self._on_state = False
+        pack = gateway_dim_off(self._sender_id, self.dev_id)
+        if pack:
+            self.send_command(pack)
 
-    def value_changed(self, val):
-        """Update the internal state of this device."""
-        self._brightness = math.floor(val / 100.0 * 256.0)
-        self._on_state = bool(val != 0)
-        self.schedule_update_ha_state()
+    def teach_in(self, **kwargs):
+        """Send learn telegram to the device"""
+        pack = generate_eltako_38_teachin(self._sender_id, self.dev_id)
+        try:
+            self.send_command(pack)
+        except:
+            _LOGGER.error("Failed to send EnOcean packet")
+
+
+    def process_telegram(self, packet):
+        """Process incming telegram."""
+        if packet.rorg != RORG.BS4:
+            return
+        try:
+            self._on_state, self._brightness = gateway_dim_state(packet)
+            self.schedule_update_ha_state()
+        except:
+            _LOGGER.error("Failed to parse packet")
+        return
